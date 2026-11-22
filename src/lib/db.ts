@@ -19,6 +19,10 @@ import type { Storage } from "./store/types.ts";
  * of the event. It is keyed on (mandate_id, slot) and written with
  * INSERT OR IGNORE, so replaying a ledger range cannot record the same
  * event — or the same departure — twice.
+ *
+ * Schema changes are forward-only. Startup migrations add columns and indexes
+ * without dropping or rewriting existing data; changes that cannot follow that
+ * rule need a separately planned migration and rollout.
  */
 const SCHEMA = `
 
@@ -279,9 +283,10 @@ CREATE INDEX IF NOT EXISTS past_due_mandates_first_past_due ON past_due_mandates
 `;
 
 /**
- * Columns added after the first deployment. CREATE TABLE IF NOT EXISTS leaves
- * an existing table alone, so new columns have to be added explicitly. Each
- * entry is applied only when absent, which keeps repeated startups a no-op.
+ * Forward-only columns added after the first deployment. CREATE TABLE IF
+ * NOT EXISTS leaves an existing table alone, so new columns have to be added
+ * explicitly. Each entry is applied only when absent, keeping repeated
+ * startups a no-op.
  */
 const ADDED_COLUMNS: ReadonlyArray<[table: string, column: string, decl: string]> = [
   ["plans", "name", "TEXT NOT NULL DEFAULT ''"],
@@ -292,11 +297,12 @@ const ADDED_COLUMNS: ReadonlyArray<[table: string, column: string, decl: string]
 ];
 
 /**
- * Indexes added after the first deployment. Each is created only when its
- * table exists (a migration may run against a partially built database) and
- * `IF NOT EXISTS` keeps repeated startups a no-op. These are covering indexes
- * for the merchant and subscriber summary routes: the aggregates read only
- * the indexed columns, so the planner never touches the table b-tree.
+ * Forward-only indexes added after the first deployment. Each is created
+ * only when its table exists (a migration may run against a partially built
+ * database), and `IF NOT EXISTS` keeps repeated startups a no-op. These are
+ * covering indexes for the merchant and subscriber summary routes: the
+ * aggregates read only the indexed columns, so the planner never touches the
+ * table b-tree.
  */
 const ADDED_INDEXES: ReadonlyArray<[table: string, name: string, columns: string]> = [
   ["mandates", "mandates_merchant_status_period_amount", "merchant, status, period, amount"],

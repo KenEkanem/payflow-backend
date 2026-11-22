@@ -74,6 +74,12 @@ opens weekly updates for npm packages and GitHub Actions.
   them on build, and Node needs them at runtime.
 - **Money is never a JS number.** i128 values arrive as `bigint` and are stored
   as `TEXT`. Use the `big()` helper. A float here is a bug.
+- **Database migrations are forward-only.** Startup migrations may add columns
+  and indexes, but must preserve existing columns and rows. A change that
+  needs data removal or transformation needs a separately planned migration
+  and rollout, with compatibility retained until existing deployments have
+  crossed it. Cover upgrades from a legacy schema and repeated application in
+  `test/db.test.ts`.
 - **Every indexer write must be idempotent.** Re-indexing a ledger range twice
   must not change the result. Add a replay test for any new event.
 - **Structured logging only.** `logger.info({ field }, "message")` — never

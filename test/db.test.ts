@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { test, describe } from "node:test";
-import { openDatabase, backupDatabase, writeCursor } from "../src/lib/db.ts";
+import { openDatabase, backupDatabase, migrate, writeCursor } from "../src/lib/db.ts";
 
 type Db = ReturnType<typeof openDatabase>;
 
@@ -14,6 +15,103 @@ function queryPlan(db: Db, sql: string, args: unknown[] = []): string {
     .map((r) => String((r as { detail: string }).detail))
     .join(" | ");
 }
+
+describe("forward-only schema migrations", () => {
+  test("adds current columns without changing legacy rows or columns, and is repeatable", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(`
+      CREATE TABLE plans (
+        id INTEGER PRIMARY KEY, merchant TEXT NOT NULL, token TEXT NOT NULL,
+        amount TEXT NOT NULL, period INTEGER NOT NULL, active INTEGER NOT NULL,
+        ledger INTEGER NOT NULL
+      );
+      INSERT INTO plans VALUES (7, 'merchant', 'token', '9007199254740993', 30, 1, 42);
+      CREATE TABLE mandates (
+        id INTEGER PRIMARY KEY, subscriber TEXT NOT NULL, merchant TEXT NOT NULL,
+        plan_id INTEGER NOT NULL, amount TEXT NOT NULL, period INTEGER NOT NULL,
+        next_charge INTEGER NOT NULL, last_charge INTEGER NOT NULL,
+        charges_made INTEGER NOT NULL, max_charges INTEGER NOT NULL,
+        status TEXT NOT NULL, ledger INTEGER NOT NULL
+      );
+      INSERT INTO mandates VALUES (8, 'subscriber', 'merchant', 7, '9007199254740993', 30,
+        100, 70, 1, 5, 'Active', 42);
+      CREATE TABLE webhooks (
+        id INTEGER PRIMARY KEY, merchant TEXT NOT NULL, url TEXT NOT NULL,
+        secret TEXT NOT NULL, active INTEGER NOT NULL, failed INTEGER NOT NULL,
+        failures INTEGER NOT NULL, last_attempt INTEGER, last_status INTEGER,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO webhooks VALUES (9, 'merchant', 'https://example.test', 'secret',
+        1, 0, 0, NULL, NULL, 42);
+    `);
+
+    migrate(db);
+
+    const plan = db.prepare("SELECT * FROM plans WHERE id = 7").get() as {
+      id: number; merchant: string; token: string; amount: string; period: number;
+      active: number; ledger: number; name: string;
+    };
+    assert.equal(plan.id, 7);
+    assert.equal(plan.merchant, "merchant");
+    assert.equal(plan.token, "token");
+    assert.equal(plan.amount, "9007199254740993");
+    assert.equal(plan.period, 30);
+    assert.equal(plan.active, 1);
+    assert.equal(plan.ledger, 42);
+    assert.equal(plan.name, "");
+
+    const mandate = db.prepare("SELECT * FROM mandates WHERE id = 8").get() as {
+      subscriber: string; amount: string; fee_bps: number; ended_by: string | null;
+    };
+    assert.equal(mandate.subscriber, "subscriber");
+    assert.equal(mandate.amount, "9007199254740993");
+    assert.equal(mandate.fee_bps, 0);
+    assert.equal(mandate.ended_by, null);
+
+    const webhook = db.prepare("SELECT * FROM webhooks WHERE id = 9").get() as {
+      url: string; secret: string; previous_secret: string | null;
+      previous_secret_expires_at: number | null;
+    };
+    assert.equal(webhook.url, "https://example.test");
+    assert.equal(webhook.secret, "secret");
+    assert.equal(webhook.previous_secret, null);
+    assert.equal(webhook.previous_secret_expires_at, null);
+
+    const plansColumnsBefore = db.prepare("SELECT name FROM pragma_table_info('plans') ORDER BY cid").all();
+    const indexCountBefore = (db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index'").get() as { n: number }).n;
+    migrate(db);
+    assert.deepEqual(
+      db.prepare("SELECT name FROM pragma_table_info('plans') ORDER BY cid").all(),
+      plansColumnsBefore,
+    );
+    assert.equal(
+      (db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index'").get() as { n: number }).n,
+      indexCountBefore,
+    );
+    db.close();
+  });
+
+  test("skips absent tables in a partially built database", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec("CREATE TABLE plans (id INTEGER PRIMARY KEY, merchant TEXT NOT NULL)");
+    db.prepare("INSERT INTO plans VALUES (1, 'merchant')").run();
+
+    assert.doesNotThrow(() => migrate(db));
+    assert.equal(
+      (db.prepare("SELECT name FROM pragma_table_info('plans') WHERE name = 'name'").get() as { name: string }).name,
+      "name",
+    );
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM plans").get() as { n: number }).n, 1);
+    assert.doesNotThrow(() => migrate(db));
+    db.close();
+  });
+
+  test("surfaces database errors instead of treating a failed migration as success", () => {
+    const db = openDatabase(":memory:");
+    db.close();
+    assert.throws(() => migrate(db));
+  });
+});
 
 describe("summary query indexes", () => {
   test("migrate creates the covering indexes", () => {
