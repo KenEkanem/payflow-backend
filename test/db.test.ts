@@ -35,6 +35,10 @@ describe("forward-only schema migrations", () => {
       );
       INSERT INTO mandates VALUES (8, 'subscriber', 'merchant', 7, '9007199254740993', 30,
         100, 70, 1, 5, 'Active', 42);
+      INSERT INTO mandates VALUES (10, 'subscriber', 'merchant', 7, '10', 30,
+        100, 70, 1, 5, 'Active', 42);
+      INSERT INTO mandates VALUES (11, 'other', 'merchant', 7, '10', 30,
+        100, 70, 1, 5, 'Cancelled', 42);
       CREATE TABLE webhooks (
         id INTEGER PRIMARY KEY, merchant TEXT NOT NULL, url TEXT NOT NULL,
         secret TEXT NOT NULL, active INTEGER NOT NULL, failed INTEGER NOT NULL,
@@ -67,6 +71,18 @@ describe("forward-only schema migrations", () => {
     assert.equal(mandate.amount, "9007199254740993");
     assert.equal(mandate.fee_bps, 0);
     assert.equal(mandate.ended_by, null);
+
+    assert.deepEqual(
+      (db.prepare("SELECT * FROM plan_active_subscribers").all() as Record<string, unknown>[])
+        .map((row) => ({ ...row })),
+      [{ plan_id: 7, subscriber: "subscriber", mandate_count: 2 }],
+      "the upgrade groups active mandates by distinct subscriber",
+    );
+    assert.deepEqual(
+      (db.prepare("SELECT * FROM plan_subscriber_counts").all() as Record<string, unknown>[])
+        .map((row) => ({ ...row })),
+      [{ plan_id: 7, active_subscribers: 1 }],
+    );
 
     const webhook = db.prepare("SELECT * FROM webhooks WHERE id = 9").get() as {
       url: string; secret: string; previous_secret: string | null;
@@ -280,22 +296,24 @@ describe("database backup", () => {
 });
 
 describe("report query indexes", () => {
-  test("ranking plans by active mandates counts each plan from a covering index", () => {
+  test("plan ranking reads the maintained subscriber count without scanning mandates", () => {
     const db = openDatabase(":memory:");
     // The statement `listPlansBySubscribers` runs, unfiltered and by merchant.
     const ranked = (where: string, args: unknown[]) =>
       queryPlan(
         db,
-        `SELECT * FROM plans ${where}
-          ORDER BY (SELECT COUNT(*) FROM mandates m
-                     WHERE m.plan_id = plans.id AND m.status = 'Active') DESC,
+        `SELECT plans.*, COALESCE(plan_subscriber_counts.active_subscribers, 0) AS activeSubscribers
+           FROM plans
+           LEFT JOIN plan_subscriber_counts ON plan_subscriber_counts.plan_id = plans.id
+           ${where}
+          ORDER BY COALESCE(plan_subscriber_counts.active_subscribers, 0) DESC,
                    id ASC
           LIMIT ?`,
         [...args, 10],
       );
     for (const plan of [ranked("", []), ranked("WHERE merchant = ?", ["M"])]) {
-      assert.match(plan, /SEARCH m USING COVERING INDEX mandates_plan_status \(plan_id=\? AND status=\?\)/);
-      assert.doesNotMatch(plan, /SCAN m\b/);
+      assert.match(plan, /SEARCH plan_subscriber_counts USING INTEGER PRIMARY KEY \(rowid=\?\)/);
+      assert.doesNotMatch(plan, /SCAN mandates\b/);
     }
     assert.match(ranked("WHERE merchant = ?", ["M"]), /SEARCH plans USING INDEX plans_merchant/);
     db.close();

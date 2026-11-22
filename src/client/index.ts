@@ -92,6 +92,8 @@ export interface PlansQuery {
   /** Opaque cursor from a previous page; fetch the page after it. */
   cursor?: string;
   limit?: number;
+  /** Rank plans by their maintained active subscriber count. */
+  sort?: "subscribers";
 }
 
 export interface MandatesQuery {

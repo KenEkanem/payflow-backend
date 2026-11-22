@@ -13,6 +13,7 @@ import { big, num } from "./lib/stellar.ts";
 import { logger } from "./lib/logger.ts";
 import { asStorage } from "./lib/store/index.ts";
 import type { Storage } from "./lib/store/types.ts";
+import { updateActivePlanSubscriber } from "./lib/plan-subscribers.ts";
 
 /** One mandate's state as the subscription contract reports it. Amounts stay strings. */
 export interface ChainMandate {
@@ -128,7 +129,14 @@ export class Reconciler {
 
       const rows = new Map<
         number,
-        { status: string; charges_made: number; next_charge: number; merchant: string }
+        {
+          status: string;
+          charges_made: number;
+          next_charge: number;
+          merchant: string;
+          plan_id: number;
+          subscriber: string;
+        }
       >();
       const placeholders = ids.map(() => "?").join(",");
       for (const row of await this.db.all<{
@@ -137,7 +145,9 @@ export class Reconciler {
           charges_made: number;
           next_charge: number;
           merchant: string;
-        }>(`SELECT id, status, charges_made, next_charge, merchant FROM mandates WHERE id IN (${placeholders})`, ids.map(({ id }) => id))) {
+          plan_id: number;
+          subscriber: string;
+        }>(`SELECT id, status, charges_made, next_charge, merchant, plan_id, subscriber FROM mandates WHERE id IN (${placeholders})`, ids.map(({ id }) => id))) {
         rows.set(row.id, row);
       }
 
@@ -186,7 +196,23 @@ export class Reconciler {
         for (const d of drift) {
           // `d.field` is one of three hard-coded column names, never user input,
           // so the interpolation is a vetted static fragment.
-          await this.db.run(`UPDATE mandates SET ${d.field} = ? WHERE id = ?`, [d.chain, id]);
+          let applied = true;
+          await this.db.transaction(async (storage) => {
+            if (d.field === "status") {
+              const changed = await storage.get<{ id: number }>(
+                "UPDATE mandates SET status = ? WHERE id = ? AND status = ? RETURNING id",
+                [d.chain, id, row.status],
+              );
+              if (!changed) {
+                applied = false;
+                return;
+              }
+              await updateActivePlanSubscriber(storage, row, { ...row, status: String(d.chain) });
+            } else {
+              await storage.run(`UPDATE mandates SET ${d.field} = ? WHERE id = ?`, [d.chain, id]);
+            }
+          });
+          if (!applied) continue;
           result.corrections += 1;
           this.invalidateMerchant?.(row.merchant);
           logger.info(

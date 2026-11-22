@@ -78,6 +78,20 @@ CREATE INDEX IF NOT EXISTS mandates_subscriber ON mandates(subscriber);
 CREATE INDEX IF NOT EXISTS mandates_merchant   ON mandates(merchant);
 CREATE INDEX IF NOT EXISTS mandates_due        ON mandates(status, next_charge);
 
+-- Distinct subscribers with at least one active mandate per plan. The
+-- membership rows let the indexer handle multiple mandates by one subscriber
+-- without rescanning the mandates table; the count is read directly by plans.
+CREATE TABLE IF NOT EXISTS plan_active_subscribers (
+  plan_id       INTEGER NOT NULL,
+  subscriber    TEXT    NOT NULL,
+  mandate_count INTEGER NOT NULL,
+  PRIMARY KEY (plan_id, subscriber)
+);
+CREATE TABLE IF NOT EXISTS plan_subscriber_counts (
+  plan_id           INTEGER PRIMARY KEY,
+  active_subscribers INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS charges (
   tx_hash      TEXT    NOT NULL,
   mandate_id   INTEGER NOT NULL,
@@ -318,8 +332,7 @@ const ADDED_INDEXES: ReadonlyArray<[table: string, name: string, columns: string
   // The subscriber CSV streams one subscriber's charges in close-time order,
   // the same keyset pattern as the merchant export.
   ["charges", "charges_subscriber_created_at", "subscriber, created_at"],
-  // Ranking plans by active mandates counts each plan's active mandates with
-  // one covering range lookup instead of a scan of every mandate.
+  // Per-plan statistics filter mandates by plan and status.
   ["mandates", "mandates_plan_status", "plan_id, status"],
   // The protocol fee report finds the newest charge and reads only the
   // charges inside its bucket window, straight from the index.
@@ -334,6 +347,19 @@ const ADDED_INDEXES: ReadonlyArray<[table: string, name: string, columns: string
 ];
 
 export function migrate(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS plan_active_subscribers (
+      plan_id INTEGER NOT NULL,
+      subscriber TEXT NOT NULL,
+      mandate_count INTEGER NOT NULL,
+      PRIMARY KEY (plan_id, subscriber)
+    );
+    CREATE TABLE IF NOT EXISTS plan_subscriber_counts (
+      plan_id INTEGER PRIMARY KEY,
+      active_subscribers INTEGER NOT NULL
+    );
+  `);
+
   for (const [table, column, decl] of ADDED_COLUMNS) {
     const columns = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as {
       name: string;
@@ -351,6 +377,22 @@ export function migrate(db: DatabaseSync): void {
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
       .get(table);
     if (exists) db.exec(`CREATE INDEX IF NOT EXISTS ${name} ON ${table}(${columns})`);
+  }
+
+  // Seed these additive projections for databases created before the tables
+  // existed. INSERT OR IGNORE makes startup repeatable without overwriting
+  // counts already maintained by the indexer.
+  const mandateColumns = db.prepare("SELECT name FROM pragma_table_info('mandates')").all() as {
+    name: string;
+  }[];
+  if (["plan_id", "subscriber", "status"].every((name) => mandateColumns.some((column) => column.name === name))) {
+    db.exec(`
+      INSERT OR IGNORE INTO plan_active_subscribers (plan_id, subscriber, mandate_count)
+      SELECT plan_id, subscriber, COUNT(*) FROM mandates
+       WHERE status = 'Active' GROUP BY plan_id, subscriber;
+      INSERT OR IGNORE INTO plan_subscriber_counts (plan_id, active_subscribers)
+      SELECT plan_id, COUNT(*) FROM plan_active_subscribers GROUP BY plan_id;
+    `);
   }
 }
 

@@ -94,6 +94,7 @@ describe("typed api client", () => {
     const all = await client.plans();
     assert.equal(all.plans.length, 1);
     assert.equal(all.plans[0]?.name, "Pro Monthly");
+    assert.equal(all.plans[0]?.activeSubscribers, 1);
     // Amounts stay strings end to end; the client never turns money into a float.
     assert.equal(typeof all.plans[0]?.amount, "string");
 
@@ -101,6 +102,8 @@ describe("typed api client", () => {
     assert.equal(mine.plans.length, 1);
     const none = await client.plans({ merchant: UNKNOWN_MERCHANT });
     assert.equal(none.plans.length, 0);
+    const popular = await client.plans({ sort: "subscribers" });
+    assert.equal(popular.plans[0]?.activeSubscribers, 1);
   });
 
   test("fetches one plan and one mandate", async () => {

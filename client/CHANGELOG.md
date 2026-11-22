@@ -8,6 +8,8 @@ All notable changes to `@mmm-pay/payflow-client`. The format follows
 
 ### Added
 
+- `activeSubscribers` on plan responses and `sort: "subscribers"` in `plans()`:
+  counts distinct subscribers with at least one active mandate per plan.
 - `chargeAttempts(mandateId, { limit })` for `GET /api/v1/mandates/:id/attempts`:
   the keeper's attempts to charge a mandate, with the result, error code,
   transaction hash and shortfall of each, and the `ChargeAttemptPage` and

@@ -51,6 +51,16 @@ CREATE INDEX IF NOT EXISTS mandates_merchant ON mandates(merchant);
 CREATE INDEX IF NOT EXISTS mandates_due ON mandates(status, next_charge);
 CREATE INDEX IF NOT EXISTS mandates_merchant_status_period_amount
   ON mandates(merchant, status, period, amount);
+CREATE TABLE IF NOT EXISTS plan_active_subscribers (
+  plan_id BIGINT NOT NULL,
+  subscriber TEXT NOT NULL,
+  mandate_count BIGINT NOT NULL,
+  PRIMARY KEY (plan_id, subscriber)
+);
+CREATE TABLE IF NOT EXISTS plan_subscriber_counts (
+  plan_id BIGINT PRIMARY KEY,
+  active_subscribers BIGINT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS charges (
   tx_hash TEXT NOT NULL,
   mandate_id BIGINT NOT NULL,
@@ -264,6 +274,17 @@ export class PostgresStorage extends PgExecutor implements Storage {
     const pool = new Pool(poolConfig);
     const storage = new PostgresStorage(pool);
     await storage.run(SCHEMA);
+    await storage.run(`
+      INSERT INTO plan_active_subscribers (plan_id, subscriber, mandate_count)
+      SELECT plan_id, subscriber, COUNT(*) FROM mandates
+       WHERE status = 'Active' GROUP BY plan_id, subscriber
+      ON CONFLICT (plan_id, subscriber) DO NOTHING
+    `);
+    await storage.run(`
+      INSERT INTO plan_subscriber_counts (plan_id, active_subscribers)
+      SELECT plan_id, COUNT(*) FROM plan_active_subscribers GROUP BY plan_id
+      ON CONFLICT (plan_id) DO NOTHING
+    `);
     return storage;
   }
 

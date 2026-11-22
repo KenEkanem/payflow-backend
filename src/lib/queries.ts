@@ -84,7 +84,11 @@ export async function listPlans(
   const { where, args } = planFilter(filter);
   return cursorPage<PlanRow>(
     db,
-    "FROM plans",
+    `FROM (
+       SELECT plans.*, COALESCE(plan_subscriber_counts.active_subscribers, 0) AS "activeSubscribers"
+         FROM plans
+         LEFT JOIN plan_subscriber_counts ON plan_subscriber_counts.plan_id = plans.id
+     ) plans`,
     where,
     args,
     filter,
@@ -116,14 +120,10 @@ function planFilter(filter: Omit<ListPlansFilter, "cursor" | "limit">): {
 }
 
 /**
- * The `limit` most popular plans: the most active mandates first, ties broken
+ * The `limit` most popular plans: the most active subscribers first, ties broken
  * by plan id ascending so the order is total and stable. A plan without an
- * active mandate still ranks, last, with a count of zero.
- *
- * Each plan's count is one covering range lookup on `mandates_plan_status`
- * (plan_id, status), so the cost is O(P log M + A) for the P plans the
- * filters keep, M mandates and A of them active; SQLite keeps only the top
- * `limit` rows while it sorts, so memory is O(limit).
+ * active subscriber still ranks, last, with a count of zero. Counts are read
+ * directly from the indexer's maintained per-plan projection.
  */
 export async function listPlansBySubscribers(
   db: Storage,
@@ -131,9 +131,11 @@ export async function listPlansBySubscribers(
 ): Promise<PlanRow[]> {
   const { where, args } = planFilter(filter);
   return db.all<PlanRow>(
-      `SELECT * FROM plans ${where}
-        ORDER BY (SELECT COUNT(*) FROM mandates m
-                   WHERE m.plan_id = plans.id AND m.status = 'Active') DESC,
+      `SELECT plans.*, COALESCE(plan_subscriber_counts.active_subscribers, 0) AS "activeSubscribers"
+         FROM plans
+         LEFT JOIN plan_subscriber_counts ON plan_subscriber_counts.plan_id = plans.id
+         ${where}
+        ORDER BY COALESCE(plan_subscriber_counts.active_subscribers, 0) DESC,
                  id ASC
         LIMIT ?`,
     [...args, filter.limit],
@@ -172,7 +174,13 @@ export async function cursorPage<T extends { id: number }>(
 
 /** Look up a single plan by on-chain id. */
 export async function getPlanById(db: Storage, id: number): Promise<PlanRow | undefined> {
-  return db.get<PlanRow>("SELECT * FROM plans WHERE id = ?", [id]);
+  return db.get<PlanRow>(
+    `SELECT plans.*, COALESCE(plan_subscriber_counts.active_subscribers, 0) AS "activeSubscribers"
+       FROM plans
+       LEFT JOIN plan_subscriber_counts ON plan_subscriber_counts.plan_id = plans.id
+      WHERE plans.id = ?`,
+    [id],
+  );
 }
 
 /** A merchant's self-declared profile, or undefined when it never set one. */

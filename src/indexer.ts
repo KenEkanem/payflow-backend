@@ -3,6 +3,7 @@ import { rpc, xdr } from "@stellar/stellar-sdk";
 import type { Config, NetworkConfig } from "./config.ts";
 import type { Storage } from "./lib/store/types.ts";
 import { asStorage } from "./lib/store/index.ts";
+import { updateActivePlanSubscriber, type ActivePlanSubscriber } from "./lib/plan-subscribers.ts";
 
 export type IndexerConfig = Config | NetworkConfig;
 import {
@@ -93,6 +94,7 @@ export class Indexer {
   private readonly db: Storage;
   private readonly server: IndexerRpc;
   private readonly config: IndexerConfig;
+  private directApplyTail: Promise<void> = Promise.resolve();
   readonly events = new EventEmitter();
   readonly merchantCache: MerchantSummaryCache;
   readonly status: IndexerStatus = {
@@ -575,6 +577,8 @@ export class Indexer {
     return this.db.transaction(async (storage) => {
       for (const table of [
         "plans",
+        "plan_subscriber_counts",
+        "plan_active_subscribers",
         "mandates",
         "charges",
         "vault_events",
@@ -627,6 +631,26 @@ export class Indexer {
   async apply(
     e: DecodedEvent,
     storage: Storage = this.db,
+    notifications?: DecodedEvent[],
+  ): Promise<ApplyOutcome> {
+    if (storage !== this.db) return this.applyNow(e, storage, notifications);
+
+    const previous = this.directApplyTail;
+    let release!: () => void;
+    this.directApplyTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await this.applyNow(e, storage, notifications);
+    } finally {
+      release();
+    }
+  }
+
+  private async applyNow(
+    e: DecodedEvent,
+    storage: Storage,
     notifications?: DecodedEvent[],
   ): Promise<ApplyOutcome> {
     const problems = specProblems(e);
@@ -783,6 +807,11 @@ export class Indexer {
 
   private async onSubscribed(e: DecodedEvent, storage: Storage): Promise<void> {
     const [mandateId, subscriber, merchant] = e.topics;
+    const id = num(mandateId);
+    const previous = await storage.get<ActivePlanSubscriber>(
+      "SELECT plan_id, subscriber, status FROM mandates WHERE id = ?",
+      [id],
+    );
     await this.merchantCache.invalidate(str(merchant));
     await storage.run(
       `INSERT INTO mandates
@@ -795,7 +824,7 @@ export class Indexer {
            max_charges = excluded.max_charges,
            fee_bps     = excluded.fee_bps`,
       [
-        num(mandateId),
+        id,
         str(subscriber),
         str(merchant),
         num(e.data.plan_id),
@@ -807,6 +836,11 @@ export class Indexer {
         e.ledger,
       ],
     );
+    await updateActivePlanSubscriber(storage, previous, {
+      plan_id: previous?.plan_id ?? num(e.data.plan_id),
+      subscriber: str(subscriber),
+      status: previous?.status ?? "Active",
+    });
   }
 
   /** The ledger close time is stable across replays; wall time is only a fallback. */
@@ -876,12 +910,16 @@ export class Indexer {
   ): Promise<string | undefined> {
     const [mandateId] = e.topics;
     const mid = num(mandateId);
-    const row = await storage.get<{ merchant: string }>(
-      "SELECT merchant FROM mandates WHERE id = ?",
+    const row = await storage.get<ActivePlanSubscriber & { merchant: string }>(
+      "SELECT merchant, plan_id, subscriber, status FROM mandates WHERE id = ?",
       [mid],
     );
     if (row) await this.merchantCache.invalidate(row.merchant);
-    await storage.run("UPDATE mandates SET status = ?, ended_by = ? WHERE id = ?", [status, endedBy, mid]);
+    const changed = row && await storage.get<{ id: number }>(
+      "UPDATE mandates SET status = ?, ended_by = ? WHERE id = ? AND status = ? RETURNING id",
+      [status, endedBy, mid, row.status],
+    );
+    if (row && changed) await updateActivePlanSubscriber(storage, row, { ...row, status });
     return row?.merchant;
   }
 
@@ -928,16 +966,23 @@ export class Indexer {
   private async onPauseChanged(e: DecodedEvent, storage: Storage): Promise<void> {
     const [mandateId] = e.topics;
     const mid = num(mandateId);
-    const row = await storage.get<{ merchant: string }>(
-      "SELECT merchant FROM mandates WHERE id = ?",
+    const row = await storage.get<ActivePlanSubscriber & { merchant: string }>(
+      "SELECT merchant, plan_id, subscriber, status FROM mandates WHERE id = ?",
       [mid],
     );
     if (row) await this.merchantCache.invalidate(row.merchant);
-    await storage.run(
+    const desiredStatus = e.data.paused ? "Paused" : "Active";
+    const changed = row && (row.status === "Active" || row.status === "Paused") && await storage.get<{ id: number }>(
       `UPDATE mandates SET status = ?
-          WHERE id = ? AND status IN ('Active','Paused')`,
-      [e.data.paused ? "Paused" : "Active", mid],
+          WHERE id = ? AND status = ? RETURNING id`,
+      [desiredStatus, mid, row.status],
     );
+    if (row && changed) {
+      await updateActivePlanSubscriber(storage, row, {
+        ...row,
+        status: desiredStatus,
+      });
+    }
   }
 
   private async onVaultEvent(e: DecodedEvent, storage: Storage): Promise<void> {

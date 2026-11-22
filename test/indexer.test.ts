@@ -151,6 +151,48 @@ describe("indexer projections", () => {
     assert.equal(row.charges_made, 0);
   });
 
+  test("maintains distinct active subscribers through pause and end transitions", async () => {
+    const second = {
+      ...subscribed,
+      topics: [2n, SUBSCRIBER, MERCHANT],
+      txHash: "tx-sub-2",
+    };
+    await ix.apply(subscribed);
+    await ix.apply(second);
+    const count = () => (d.prepare(
+      "SELECT active_subscribers FROM plan_subscriber_counts WHERE plan_id = 1",
+    ).get() as { active_subscribers: number } | undefined)?.active_subscribers ?? 0;
+    const members = () => (d.prepare(
+      "SELECT mandate_count FROM plan_active_subscribers WHERE plan_id = 1 AND subscriber = ?",
+    ).get(SUBSCRIBER) as { mandate_count: number } | undefined)?.mandate_count ?? 0;
+
+    assert.equal(count(), 1, "two active mandates held by one subscriber count once");
+    assert.equal(members(), 2);
+
+    await ix.apply(event("pause_changed", [1n, SUBSCRIBER], { paused: true }));
+    assert.equal(count(), 1, "pausing one mandate retains the other active membership");
+    assert.equal(members(), 1);
+
+    await ix.apply(event("cancelled", [2n, SUBSCRIBER], {}));
+    assert.equal(count(), 0);
+    assert.equal(members(), 0);
+
+    await ix.apply(event("pause_changed", [1n, SUBSCRIBER], { paused: false }));
+    assert.equal(count(), 1, "resuming a mandate restores the subscriber count");
+    await ix.apply(event("mandate_completed", [1n, SUBSCRIBER], {}));
+    assert.equal(count(), 0, "completed mandates no longer count as active");
+  });
+
+  test("a malformed subscribe event cannot change the subscriber projection", async () => {
+    await ix.apply(subscribed);
+    const malformed = { ...subscribed, txHash: "tx-bad-sub", data: { ...subscribed.data, plan_id: undefined } };
+    assert.equal(await ix.apply(malformed), "mismatched");
+    assert.equal(
+      (d.prepare("SELECT active_subscribers FROM plan_subscriber_counts WHERE plan_id = 1").get() as { active_subscribers: number }).active_subscribers,
+      1,
+    );
+  });
+
   test("emits a live event only after its projection has been applied", async () => {
     const received: DecodedEvent[] = [];
     ix.events.on("applied", (e: DecodedEvent) => received.push(e));

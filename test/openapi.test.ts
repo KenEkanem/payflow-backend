@@ -160,6 +160,15 @@ describe("the OpenAPI document", () => {
     assert.ok(spec.info.version.length > 0);
   });
 
+  test("documents the maintained plan subscriber count", async () => {
+    const spec = await getSpec();
+    const plan = spec.components?.schemas?.Plan;
+    const details = plan?.allOf?.[1];
+    assert.equal(details?.properties?.activeSubscribers?.type, "integer");
+    assert.ok(details?.required?.includes("activeSubscribers"));
+    assert.match(spec.paths["/api/plans"]?.get?.description ?? "", /distinct subscribers/);
+  });
+
   test("covers every route Express serves", async () => {
     const spec = await getSpec();
     const routes = appRoutes(app);

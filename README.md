@@ -387,7 +387,7 @@ unversioned `/api/<network>/...` paths remain as aliases.
 | `GET` | `/api/openapi.json` | The OpenAPI 3.1 description of this API |
 | `GET` | `/api/docs` | Human-readable API reference, rendered by a self-hosted ReDoc bundle |
 | `GET` | `/api/plans?merchant=&limit=` | Published plans |
-| `GET` | `/api/plans?merchant=&limit=&sort=` | Published plans, each with its merchant's self-declared `merchantName`; `sort=subscribers` ranks them by active mandates (ties by plan id) |
+| `GET` | `/api/plans?merchant=&limit=&sort=` | Published plans, each with its merchant's self-declared `merchantName` and distinct `activeSubscribers`; `sort=subscribers` ranks them by that maintained count (ties by plan id) |
 | `GET` | `/api/plans/:id` | One plan |
 | `GET` | `/api/plans/:id/stats` | Per-plan statistics: active and total mandates, cancellations, total collected, average charges per mandate, average and median lifetime value per subscriber net of fee |
 | `GET` | `/api/mandates?ids=&subscriber=&merchant=&status=` | Mandates |

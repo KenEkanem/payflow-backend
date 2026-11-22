@@ -369,7 +369,7 @@ function apiPaths(root: string): Record<string, PathItemObject> {
         tags: ["plans"],
         summary: "List published plans",
         description:
-          "Plans a merchant has published, newest first. Each amount is a decimal string in the plan's token's smallest unit. With `sort=subscribers` the plans are ranked by active mandates instead, most first, ties broken by plan id ascending: one page of `limit` plans, so `nextCursor` is null and `cursor` is refused.",
+          "Plans a merchant has published, newest first. Each plan includes the number of distinct subscribers with at least one active mandate. With `sort=subscribers` the plans are ranked by this maintained count, most first, ties broken by plan id ascending: one page of `limit` plans, so `nextCursor` is null and `cursor` is refused.",
         operationId: `listPlans${operationSuffix(root)}`,
         parameters: [
           merchantParameter(),
@@ -380,7 +380,7 @@ function apiPaths(root: string): Record<string, PathItemObject> {
             in: "query",
             required: false,
             description:
-              "`subscribers` ranks the plans by active mandates, most first, ties broken by plan id ascending. Absent: newest first.",
+              "`subscribers` ranks the plans by distinct active subscribers, most first, ties broken by plan id ascending. Absent: newest first.",
             schema: { type: "string", enum: ["subscribers"] },
           },
         ],
@@ -1791,6 +1791,10 @@ function componentSchemas(): Record<string, SchemaObject> {
             amount: amount(),
             period: { type: "integer", description: "The billing period in seconds." },
             active: { type: "integer", description: "1 when the plan is published, 0 when it is not." },
+            activeSubscribers: {
+              type: "integer",
+              description: "Distinct subscribers with at least one active mandate on this plan.",
+            },
             open: { type: "boolean", description: "True while the plan accepts new subscribers (`active` is 1); false once it is closed." },
             ledger: { type: "integer" },
             merchantName: {
@@ -1799,7 +1803,7 @@ function componentSchemas(): Record<string, SchemaObject> {
                 "The merchant's self-declared display name (see `/merchants/{address}/profile`); not verified. Null when the merchant has not set a profile.",
             },
           },
-          required: ["id", "merchant", "name", "token", "amount", "period", "active", "ledger"],
+          required: ["id", "merchant", "name", "token", "amount", "period", "active", "activeSubscribers", "ledger"],
         },
       ],
     },

@@ -46,6 +46,8 @@ export interface PlanRow extends TokenFields {
   amount: string;
   period: number;
   active: number;
+  /** Distinct subscribers with at least one active mandate on this plan. */
+  activeSubscribers: number;
   /** True while the plan accepts new subscribers (`active` is 1). */
   open?: boolean;
   ledger: number;

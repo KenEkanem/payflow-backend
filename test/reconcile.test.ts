@@ -79,6 +79,14 @@ function dbWithMandate(overrides: Partial<ChainMandate> & { status?: string } = 
       m.chargesMade,
       m.status,
     );
+  if (m.status === "Active") {
+    database.prepare(
+      "INSERT INTO plan_active_subscribers (plan_id, subscriber, mandate_count) VALUES (1, ?, 1)",
+    ).run(SUBSCRIBER);
+    database.prepare(
+      "INSERT INTO plan_subscriber_counts (plan_id, active_subscribers) VALUES (1, 1)",
+    ).run();
+  }
   return { database, mandate: m };
 }
 
@@ -135,6 +143,34 @@ describe("reconcile", () => {
     assert.equal(result.drift[0]!.projection, "Active");
     assert.equal(result.drift[0]!.chain, "Cancelled");
     assert.equal(mandateRow(database, 1)!.status, "Cancelled");
+    assert.equal(
+      (database.prepare("SELECT active_subscribers FROM plan_subscriber_counts WHERE plan_id = 1").get() as { active_subscribers: number }).active_subscribers,
+      0,
+    );
+  });
+
+  test("does not overwrite a status that changed while the chain read was in flight", async () => {
+    const { database } = dbWithMandate({ status: "Active" });
+    const server = {
+      simulateTransaction: async () => {
+        database.prepare("UPDATE mandates SET status = 'Paused' WHERE id = 1").run();
+        database.prepare("DELETE FROM plan_active_subscribers WHERE plan_id = 1 AND subscriber = ?")
+          .run(SUBSCRIBER);
+        database.prepare("UPDATE plan_subscriber_counts SET active_subscribers = 0 WHERE plan_id = 1").run();
+        return simulate(chainMandate({ status: "Cancelled" }));
+      },
+    } as never;
+    const rx = new Reconciler(database, server, SUBSCRIPTION, "Test SDF Network ; September 2015", 1);
+
+    const result = await rx.tick();
+
+    assert.equal(result.drift.length, 1);
+    assert.equal(result.corrections, 0, "the stale correction is skipped");
+    assert.equal(mandateRow(database, 1)!.status, "Paused");
+    assert.equal(
+      (database.prepare("SELECT active_subscribers FROM plan_subscriber_counts WHERE plan_id = 1").get() as { active_subscribers: number }).active_subscribers,
+      0,
+    );
   });
 
   test("corrects charges_made drift", async () => {

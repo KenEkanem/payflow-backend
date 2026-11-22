@@ -1148,24 +1148,24 @@ describe("per-plan statistics", () => {
 
   before(async () => {
     // Plan 1: one Active mandate with two settled charges, one Cancelled.
-    statsIx.apply(ev("plan_created", [MERCHANT, 1n], {
+    await statsIx.apply(ev("plan_created", [MERCHANT, 1n], {
       token: "C", amount: 10_000_000n, period: 2_592_000n, name: "Popular",
     }));
-    statsIx.apply(ev("subscribed", [1n, STATS_SUB_A, MERCHANT], {
+    await statsIx.apply(ev("subscribed", [1n, STATS_SUB_A, MERCHANT], {
       plan_id: 1n, amount: 10_000_000n, period: 2_592_000n, next_charge: 4_000_000_000n,
     }));
-    statsIx.apply(ev("subscribed", [2n, STATS_SUB_B, MERCHANT], {
+    await statsIx.apply(ev("subscribed", [2n, STATS_SUB_B, MERCHANT], {
       plan_id: 1n, amount: 10_000_000n, period: 2_592_000n, next_charge: 4_000_000_000n,
     }));
-    statsIx.apply(ev("cancelled", [2n, STATS_SUB_B], { charges_made: 0 }, "tx-cancel"));
-    statsIx.apply(ev("charged", [1n, STATS_SUB_A, MERCHANT], {
+    await statsIx.apply(ev("cancelled", [2n, STATS_SUB_B], { charges_made: 0 }, "tx-cancel"));
+    await statsIx.apply(ev("charged", [1n, STATS_SUB_A, MERCHANT], {
       amount: 9_900_000n, fee: 100_000n, charges_made: 1n, next_charge: 4_000_000_000n,
     }, "tx-c1"));
-    statsIx.apply(ev("charged", [1n, STATS_SUB_A, MERCHANT], {
+    await statsIx.apply(ev("charged", [1n, STATS_SUB_A, MERCHANT], {
       amount: 9_900_000n, fee: 100_000n, charges_made: 2n, next_charge: 4_000_000_000n,
     }, "tx-c2"));
     // Plan 2: published but never subscribed to.
-    statsIx.apply(ev("plan_created", [MERCHANT, 2n], {
+    await statsIx.apply(ev("plan_created", [MERCHANT, 2n], {
       token: "C", amount: 5_000_000n, period: 2_592_000n, name: "Unused",
     }));
 
@@ -2208,39 +2208,43 @@ describe("most popular plans", () => {
   const MERCHANT_B = testAddress(71);
   let api: Awaited<ReturnType<typeof serveDb>>;
 
-  type Plans = { plans: { id: number; merchantName: string | null }[]; nextCursor: string | null };
+  type Plans = {
+    plans: { id: number; merchantName: string | null; activeSubscribers: number }[];
+    nextCursor: string | null;
+  };
 
   before(async () => {
     const plan = (id: bigint, merchant: string) =>
       popIx.apply(ev("plan_created", [merchant, id], { token: "C", amount: 1_000n, period: 2_592_000n }, `plan-${id}`));
     let mandate = 0n;
     const subscriberOf = (id: bigint) => testAddress(80 + Number(id));
-    const subscribe = (planId: bigint, merchant: string) => {
+    const subscribe = async (planId: bigint, merchant: string, subscriber?: string) => {
       mandate += 1n;
-      popIx.apply(ev("subscribed", [mandate, subscriberOf(mandate), merchant], {
+      await popIx.apply(ev("subscribed", [mandate, subscriber ?? subscriberOf(mandate), merchant], {
         plan_id: planId, amount: 1_000n, period: 2_592_000n, next_charge: 4_000_000_000n,
       }, `sub-${mandate}`));
       return mandate;
     };
-    plan(1n, MERCHANT_A);
-    plan(2n, MERCHANT_A);
-    plan(3n, MERCHANT_A);
-    plan(4n, MERCHANT_B);
-    plan(5n, MERCHANT_B);
+    await plan(1n, MERCHANT_A);
+    await plan(2n, MERCHANT_A);
+    await plan(3n, MERCHANT_A);
+    await plan(4n, MERCHANT_B);
+    await plan(5n, MERCHANT_B);
     // Active mandates per plan: 1 → 1, 2 → 3, 3 → 1 (+1 cancelled),
     // 4 → 1 (+1 paused), 5 → 0 (1 cancelled).
-    subscribe(1n, MERCHANT_A);
-    subscribe(2n, MERCHANT_A);
-    subscribe(2n, MERCHANT_A);
-    subscribe(2n, MERCHANT_A);
-    subscribe(3n, MERCHANT_A);
-    const cancelled3 = subscribe(3n, MERCHANT_A);
-    subscribe(4n, MERCHANT_B);
-    const paused4 = subscribe(4n, MERCHANT_B);
-    const cancelled5 = subscribe(5n, MERCHANT_B);
-    popIx.apply(ev("cancelled", [cancelled3, subscriberOf(cancelled3)], {}, "cancel-3"));
-    popIx.apply(ev("cancelled", [cancelled5, subscriberOf(cancelled5)], {}, "cancel-5"));
-    popIx.apply(ev("pause_changed", [paused4, subscriberOf(paused4)], { paused: true }, "pause-4"));
+    await subscribe(1n, MERCHANT_A);
+    const sameSubscriber = testAddress(79);
+    await subscribe(2n, MERCHANT_A, sameSubscriber);
+    await subscribe(2n, MERCHANT_A, sameSubscriber);
+    await subscribe(2n, MERCHANT_A);
+    await subscribe(3n, MERCHANT_A);
+    const cancelled3 = await subscribe(3n, MERCHANT_A);
+    await subscribe(4n, MERCHANT_B);
+    const paused4 = await subscribe(4n, MERCHANT_B);
+    const cancelled5 = await subscribe(5n, MERCHANT_B);
+    await popIx.apply(ev("cancelled", [cancelled3, subscriberOf(cancelled3)], {}, "cancel-3"));
+    await popIx.apply(ev("cancelled", [cancelled5, subscriberOf(cancelled5)], {}, "cancel-5"));
+    await popIx.apply(ev("pause_changed", [paused4, subscriberOf(paused4)], { paused: true }, "pause-4"));
     api = await serveDb(popDb);
   });
 
@@ -2249,13 +2253,24 @@ describe("most popular plans", () => {
     popDb.close();
   });
 
-  test("ranks plans by active mandates, ties broken by plan id", async () => {
+  test("returns active subscriber counts and ranks by distinct subscribers", async () => {
     const { status, body } = await api.get<Plans>("/api/plans?sort=subscribers");
     assert.equal(status, 200);
-    // Plans 1, 3 and 4 tie at one active mandate; cancelled and paused
-    // mandates do not count, so plan 5 ranks last with none.
+    // Plan 2 has three active mandates but two distinct subscribers. Plans
+    // 1, 3 and 4 tie at one; cancelled and paused mandates do not count.
     assert.deepEqual(body.plans.map((p) => p.id), [2, 1, 3, 4, 5]);
+    assert.deepEqual(body.plans.map((p) => p.activeSubscribers), [2, 1, 1, 1, 0]);
     assert.equal(body.nextCursor, null);
+
+    const plan = await api.get<{ activeSubscribers: number }>("/api/plans/2");
+    assert.equal(plan.status, 200);
+    assert.equal(plan.body.activeSubscribers, 2, "plan detail uses the same maintained count");
+  });
+
+  test("plan counts are available without authentication", async () => {
+    const { status, body } = await api.get<Plans>("/api/plans");
+    assert.equal(status, 200);
+    assert.ok(body.plans.every((plan) => Number.isInteger(plan.activeSubscribers)));
   });
 
   test("honours limit and the merchant filter", async () => {
@@ -2266,9 +2281,10 @@ describe("most popular plans", () => {
     assert.deepEqual(merchantB.body.plans.map((p) => p.id), [4, 5]);
   });
 
-  test("without sort the order is still newest first", async () => {
+  test("without sort the order is still newest first and includes counts", async () => {
     const { body } = await api.get<Plans>("/api/plans");
     assert.deepEqual(body.plans.map((p) => p.id), [5, 4, 3, 2, 1]);
+    assert.deepEqual(body.plans.map((p) => p.activeSubscribers), [0, 1, 1, 2, 1]);
   });
 
   test("a cursor cannot be combined with the ranking", async () => {
@@ -2371,7 +2387,7 @@ describe("merchant unpaid report", () => {
     }[];
   };
 
-  const subscribe = (
+  const subscribe = async (
     ix: Indexer,
     id: bigint,
     subscriber: string,
@@ -2383,31 +2399,31 @@ describe("merchant unpaid report", () => {
     ix.apply(ev("subscribed", [id, subscriber, merchant], {
       plan_id: planId, amount, period: 2_592_000n, next_charge: BigInt(nextCharge),
     }, `sub-${id}`));
-  const deposit = (ix: Indexer, subscriber: string, token: string, balance: bigint, tx: string) =>
+  const deposit = async (ix: Indexer, subscriber: string, token: string, balance: bigint, tx: string) =>
     ix.apply(ev("deposit", [subscriber, token], { amount: balance, balance }, tx));
 
   before(async () => {
-    unpaidIx.apply(ev("plan_created", [MERCHANT_U, 1n], { token: "CTOKEN", amount: 1n, period: 2_592_000n }, "plan-1"));
-    unpaidIx.apply(ev("plan_created", [MERCHANT_O, 2n], { token: "CTOKEN", amount: 1n, period: 2_592_000n }, "plan-2"));
+    await unpaidIx.apply(ev("plan_created", [MERCHANT_U, 1n], { token: "CTOKEN", amount: 1n, period: 2_592_000n }, "plan-1"));
+    await unpaidIx.apply(ev("plan_created", [MERCHANT_O, 2n], { token: "CTOKEN", amount: 1n, period: 2_592_000n }, "plan-2"));
     // 1: due an hour, the vault holds 4 of the 10 it needs → unpaid.
-    subscribe(unpaidIx, 1n, S1, MERCHANT_U, 1n, 10_000_000n, NOW - 3_600);
-    deposit(unpaidIx, S1, "CTOKEN", 4_000_000n, "dep-1");
+    await subscribe(unpaidIx, 1n, S1, MERCHANT_U, 1n, 10_000_000n, NOW - 3_600);
+    await deposit(unpaidIx, S1, "CTOKEN", 4_000_000n, "dep-1");
     // 2: due a day, nothing indexed for the subscriber → unpaid, balance 0.
-    subscribe(unpaidIx, 2n, S2, MERCHANT_U, 1n, 5_000_000n, NOW - 86_400);
+    await subscribe(unpaidIx, 2n, S2, MERCHANT_U, 1n, 5_000_000n, NOW - 86_400);
     // 3: due, covered by the vault → funded, not in the report.
-    subscribe(unpaidIx, 3n, S3, MERCHANT_U, 1n, 1_000_000n, NOW - 7_200);
-    deposit(unpaidIx, S3, "CTOKEN", 2_000_000n, "dep-3");
+    await subscribe(unpaidIx, 3n, S3, MERCHANT_U, 1n, 1_000_000n, NOW - 7_200);
+    await deposit(unpaidIx, S3, "CTOKEN", 2_000_000n, "dep-3");
     // 4: not due yet.
-    subscribe(unpaidIx, 4n, S1, MERCHANT_U, 1n, 99_000_000n, NOW + 3_600);
+    await subscribe(unpaidIx, 4n, S1, MERCHANT_U, 1n, 99_000_000n, NOW + 3_600);
     // 5: another merchant's unpaid mandate.
-    subscribe(unpaidIx, 5n, S2, MERCHANT_O, 2n, 5_000_000n, NOW - 86_400);
+    await subscribe(unpaidIx, 5n, S2, MERCHANT_O, 2n, 5_000_000n, NOW - 86_400);
     // 6: due as long as mandate 2; the balance is in another token, which
     // does not pay this plan → unpaid, tied with 2 on time overdue.
-    subscribe(unpaidIx, 6n, S4, MERCHANT_U, 1n, 3_000_000n, NOW - 86_400);
-    deposit(unpaidIx, S4, "COTHER", 50_000_000n, "dep-6");
+    await subscribe(unpaidIx, 6n, S4, MERCHANT_U, 1n, 3_000_000n, NOW - 86_400);
+    await deposit(unpaidIx, S4, "COTHER", 50_000_000n, "dep-6");
     // 7: due and unfunded, but cancelled → no longer chargeable.
-    subscribe(unpaidIx, 7n, S5, MERCHANT_U, 1n, 3_000_000n, NOW - 86_400);
-    unpaidIx.apply(ev("cancelled", [7n, S5], {}, "cancel-7"));
+    await subscribe(unpaidIx, 7n, S5, MERCHANT_U, 1n, 3_000_000n, NOW - 86_400);
+    await unpaidIx.apply(ev("cancelled", [7n, S5], {}, "cancel-7"));
     api = await serveDb(unpaidDb);
   });
 
@@ -2473,10 +2489,10 @@ describe("merchant unpaid report", () => {
     // 250 funded mandates fall due first, so the unpaid ones sit past the
     // first page of the walk; the two unpaid ones tie on next_charge.
     for (let i = 1; i <= 250; i += 1) {
-      subscribe(pageIx, BigInt(i), RICH, MERCHANT_U, 1n, 1n, NOW - 100_000 + i);
+      await subscribe(pageIx, BigInt(i), RICH, MERCHANT_U, 1n, 1n, NOW - 100_000 + i);
     }
-    subscribe(pageIx, 251n, BROKE, MERCHANT_U, 1n, 1n, NOW - 10);
-    subscribe(pageIx, 252n, BROKE, MERCHANT_U, 1n, 1n, NOW - 10);
+    await subscribe(pageIx, 251n, BROKE, MERCHANT_U, 1n, 1n, NOW - 10);
+    await subscribe(pageIx, 252n, BROKE, MERCHANT_U, 1n, 1n, NOW - 10);
     const paged = await serveDb(pageDb);
     try {
       const { body } = await paged.get<Unpaid>(`/api/merchants/${MERCHANT_U}/unpaid`);
