@@ -1,4 +1,8 @@
 import { createHmac, randomUUID } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { isIP, type LookupFunction } from "node:net";
 import type { DatabaseSync } from "node:sqlite";
 import { EventEmitter } from "node:events";
 import { asStorage } from "./store/index.ts";
@@ -26,6 +30,130 @@ const RETRY_BATCH = 25;
 const HISTORY_LIMIT = 100;
 /** How long a rotated secret keeps signing when no overlap is configured. */
 const DEFAULT_SECRET_OVERLAP_S = 24 * 60 * 60;
+
+export interface WebhookAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+export type WebhookLookup = (hostname: string) => Promise<WebhookAddress[]>;
+
+const systemLookup: WebhookLookup = async (hostname) => {
+  const addresses = await dnsLookup(hostname, { all: true, verbatim: true });
+  return addresses.flatMap(({ address, family }) =>
+    family === 4 || family === 6 ? [{ address, family }] : [],
+  );
+};
+
+function ipValue(address: string): { family: 4 | 6; value: bigint } | null {
+  const family = isIP(address);
+  if (family === 4) {
+    const value = address.split(".").reduce((result, part) => (result << 8n) | BigInt(part), 0n);
+    return { family: 4, value };
+  }
+  if (family !== 6) return null;
+
+  const normalized = address.toLowerCase();
+  const halves = normalized.split("::");
+  if (halves.length > 2) return null;
+  const expand = (half: string): string[] => half === "" ? [] : half.split(":");
+  const left = expand(halves[0]!);
+  const right = expand(halves[1] ?? "");
+  const missing = 8 - left.length - right.length;
+  if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
+  const groups = [...left, ...Array.from({ length: missing }, () => "0"), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  const value = groups.reduce((result, group) => (result << 16n) | BigInt(`0x${group}`), 0n);
+  return { family: 6, value };
+}
+
+function inCidr(value: bigint, network: bigint, bits: number, prefix: number): boolean {
+  const mask = ((1n << BigInt(prefix)) - 1n) << BigInt(bits - prefix);
+  return (value & mask) === network;
+}
+
+const IPV4_BLOCKED = [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
+  ["192.88.99.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24],
+  ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
+] as const;
+
+function isPublicAddress(address: WebhookAddress): boolean {
+  const parsed = ipValue(address.address);
+  if (!parsed || parsed.family !== address.family) return false;
+  if (parsed.family === 4) {
+    return !IPV4_BLOCKED.some(([network, prefix]) => {
+      const parsedNetwork = ipValue(network)!;
+      return inCidr(parsed.value, parsedNetwork.value, 32, prefix);
+    });
+  }
+
+  // Only global unicast IPv6 is accepted. This excludes loopback, link-local,
+  // unique-local, multicast, unspecified, and IPv4-mapped addresses.
+  if (!inCidr(parsed.value, 0x20000000000000000000000000000000n, 128, 3)) return false;
+  const blocked = [
+    [0x20010db8000000000000000000000000n, 32], // documentation
+    [0x20010000000000000000000000000000n, 23], // IETF protocol assignments
+    [0x20020000000000000000000000000000n, 16], // 6to4 embeds IPv4
+  ] as const;
+  return !blocked.some(([network, prefix]) => inCidr(parsed.value, network, 128, prefix));
+}
+
+async function resolvePublicTarget(rawUrl: string, lookupImpl: WebhookLookup): Promise<{
+  url: URL;
+  addresses: WebhookAddress[];
+}> {
+  const url = new URL(rawUrl);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("webhook URL must be an http(s) URL without credentials");
+  }
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const literalFamily = isIP(hostname);
+  const addresses = literalFamily
+    ? [{ address: hostname, family: literalFamily as 4 | 6 }]
+    : await lookupImpl(hostname);
+  if (addresses.length === 0 || addresses.some((address) => !isPublicAddress(address))) {
+    throw new Error("webhook URL must resolve only to public addresses");
+  }
+  return { url, addresses };
+}
+
+function postToPinnedAddress(
+  url: URL,
+  addresses: WebhookAddress[],
+  init: RequestInit,
+): Promise<FetchResponse> {
+  const first = addresses[0]!;
+  const lookup: LookupFunction = (_hostname, options, callback) => {
+    if (typeof options === "object" && options.all) {
+      callback(null, addresses);
+    } else {
+      callback(null, first.address, first.family);
+    }
+  };
+  const headers = Object.fromEntries(new Headers(init.headers).entries());
+  const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
+    method: init.method,
+    headers,
+    lookup,
+    signal: init.signal ?? undefined,
+  });
+
+  return new Promise((resolve, reject) => {
+    request.on("error", reject);
+    request.on("response", (response) => {
+      const status = response.statusCode ?? 0;
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => { body += chunk; });
+      response.on("error", reject);
+      response.on("end", () => resolve({ status, ok: status >= 200 && status < 300, text: async () => body }));
+    });
+    if (typeof init.body === "string") request.write(init.body);
+    request.end();
+  });
+}
 
 function backoffSeconds(attempt: number): number {
   return Math.min(BACKOFF_BASE_S * 2 ** (attempt - 1), BACKOFF_MAX_S);
@@ -135,6 +263,7 @@ export interface WebhookDispatcherOptions {
   db: Storage | DatabaseSync;
   events?: EventEmitter | undefined;
   fetchImpl?: typeof globalThis.fetch;
+  lookupImpl?: WebhookLookup | undefined;
   /** Seconds a rotated secret keeps signing beside the new one; 0 drops it at once. */
   secretOverlapSeconds?: number | undefined;
 }
@@ -158,15 +287,27 @@ export interface WebhookDispatcherOptions {
  */
 export class WebhookDispatcher {
   private readonly db: Storage;
-  private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly fetchImpl: typeof globalThis.fetch | undefined;
+  private readonly lookupImpl: WebhookLookup;
   private readonly events: EventEmitter;
   private readonly secretOverlapSeconds: number;
 
   constructor(options: WebhookDispatcherOptions) {
     this.db = asStorage(options.db);
-    this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    this.fetchImpl = options.fetchImpl;
+    this.lookupImpl = options.lookupImpl ?? systemLookup;
     this.events = options.events ?? new EventEmitter();
     this.secretOverlapSeconds = options.secretOverlapSeconds ?? DEFAULT_SECRET_OVERLAP_S;
+  }
+
+  /** Resolve and check the URL before accepting a merchant registration. */
+  async isPublicTarget(url: string): Promise<boolean> {
+    try {
+      await resolvePublicTarget(url, this.lookupImpl);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Subscribe to the indexer's applied events and dispatch charges. */
@@ -559,8 +700,12 @@ export class WebhookDispatcher {
         },
         body: delivery.payload,
         signal: AbortSignal.timeout(15_000),
+        redirect: "manual",
       };
-      const res = (await this.fetchImpl(webhook.url, init)) as unknown as FetchResponse;
+      const target = await resolvePublicTarget(webhook.url, this.lookupImpl);
+      const res = this.fetchImpl
+        ? (await this.fetchImpl(webhook.url, init)) as unknown as FetchResponse
+        : await postToPinnedAddress(target.url, target.addresses, init);
       httpStatus = res.status;
       ok = res.ok;
       responseBody = await res.text();

@@ -194,7 +194,7 @@ mitigation column says what an operator can do meanwhile.
 |---|---|---|---|
 | 7.1 | `/admin` is outside the rate limiter | Medium | Open |
 | 7.2 | Three admin routes ignore token scopes | Medium | Open |
-| 7.3 | Webhook URLs can target internal addresses (SSRF) | Medium | Open |
+| 7.3 | Webhook URLs can target internal addresses (SSRF) | Medium | Mitigated; egress restrictions remain defense in depth |
 | 7.4 | Webhook response bodies are read and stored without a size cap | Medium | Open |
 | 7.5 | `/health` publishes the RPC endpoint URLs | Medium | Open |
 | 7.6 | Per-IP limits trust one `X-Forwarded-For` hop | Low to medium | Deployment assumption |
@@ -229,16 +229,13 @@ full access until these routes check a scope.
 
 ### 7.3 Webhook URLs can target internal addresses (SSRF)
 
-A registration accepts any `http:` or `https:` URL
-(`registrationSchema`), and the dispatcher `POST`s to it from inside the
-service's network (`src/lib/webhooks.ts`). Loopback, private, link-local and
-cloud-metadata addresses are not refused. The caller does not see the
-response body, but `POST /api/webhooks/:id/test` answers with the status code,
-latency and error, and `GET /api/webhooks/:id/deliveries` returns the status
-code and error of every attempt. A status code, or the difference between a
-refused connection and a timeout, is enough to map what the host can reach. Registering needs only a Stellar key, which anyone
-can generate. **Mitigation:** run the service where its egress cannot reach
-anything sensitive, and block metadata endpoints at the network level.
+Webhook registration resolves every DNS address and rejects a target if any
+address is not public. The dispatcher repeats that check before each delivery
+and pins the connection to the checked address, so a DNS change cannot route
+the request to a private host. Redirects are not followed. Loopback, private,
+link-local, metadata, reserved and other non-public addresses are refused.
+Existing registrations are checked at delivery time as well. Keep network
+egress restrictions in place as defense in depth.
 
 ### 7.4 Webhook response bodies are read and stored without a size cap
 

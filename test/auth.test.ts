@@ -128,6 +128,7 @@ describe("SEP-10 sign-in", () => {
     const dispatcher = new WebhookDispatcher({
       db,
       fetchImpl: (async () => ({ status: 200, ok: true, text: async () => "ok" })) as unknown as typeof fetch,
+      lookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
     });
     const app = createApp([{ config: testnet, db, webhooks: dispatcher, auth }], config);
     await new Promise<void>((resolve) => {

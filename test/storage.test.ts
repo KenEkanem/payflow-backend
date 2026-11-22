@@ -309,6 +309,7 @@ test("PostgreSQL stores and delivers webhook events", { skip: !DATABASE_URL }, a
     const dispatcher = new WebhookDispatcher({
       db: storage,
       fetchImpl: async () => new Response("ok", { status: 200 }),
+      lookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
     });
     const registration = await dispatcher.register(MERCHANT, "https://payflow.example/hook", "secret");
     assert.ok(registration.id > 0);

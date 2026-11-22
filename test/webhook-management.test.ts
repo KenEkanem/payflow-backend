@@ -50,6 +50,10 @@ describe("webhook management", () => {
   const calls: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
   /** Per-URL scripted answers, consumed in order; then 200. "throw" is a network error. */
   const script = new Map<string, Array<number | "throw">>();
+  const lookupImpl = async (hostname: string) => [{
+    address: hostname === "private.example" ? "10.0.0.8" : "93.184.216.34",
+    family: 4 as const,
+  }];
   const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     const headers = Object.fromEntries(
@@ -64,6 +68,7 @@ describe("webhook management", () => {
     db,
     events: ix.events,
     fetchImpl: fetchImpl as typeof fetch,
+    lookupImpl,
     secretOverlapSeconds: OVERLAP_S,
   });
   dispatcher.bind(ix.events);
@@ -158,7 +163,12 @@ describe("webhook management", () => {
     });
 
     test("an overlap of zero retires the old secret at once", async () => {
-      const immediate = new WebhookDispatcher({ db, fetchImpl: fetchImpl as typeof fetch, secretOverlapSeconds: 0 });
+      const immediate = new WebhookDispatcher({
+        db,
+        fetchImpl: fetchImpl as typeof fetch,
+        lookupImpl,
+        secretOverlapSeconds: 0,
+      });
       const hook = await immediate.register(merchant, "https://m.example/leaked", "leaked-secret");
       const rotation = (await immediate.rotateSecret(merchant, hook.id))!;
       assert.equal(rotation.previousSecretExpiresAt, null);
@@ -233,6 +243,17 @@ describe("webhook management", () => {
       const unreachable = (await (await ping(hook.id)).json()) as WebhookTestResult;
       assert.equal(unreachable.statusCode, null);
       assert.equal(unreachable.error, "connect ECONNREFUSED");
+    });
+
+    test("does not send to a stored URL that now resolves to a private address", async () => {
+      const hook = await dispatcher.register(merchant, "https://private.example/hook", "private-secret");
+      calls.length = 0;
+
+      const result = await dispatcher.ping(merchant, hook.id);
+
+      assert.equal(result?.status, "pending");
+      assert.match(result?.error ?? "", /public addresses/);
+      assert.equal(calls.length, 0, "the transport was never called");
     });
 
     test("needs the merchant's proof and a webhook that is receiving deliveries", async () => {

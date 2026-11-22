@@ -38,3 +38,8 @@ and impact. Acknowledgement within 72 hours.
 - **RPC history is bounded.** Soroban RPC retains a limited ledger window. A
   service offline longer than that window will have a gap; rebuild from a
   full-history provider rather than assuming the projection is complete.
+- **Webhook URLs must resolve only to public IP addresses.** Registration and
+  each delivery reject loopback, private, link-local, metadata and other
+  non-public targets. DNS is checked again for each attempt and requests are
+  pinned to the checked addresses; redirects are not followed. Update any
+  existing webhook whose DNS points to an internal address.

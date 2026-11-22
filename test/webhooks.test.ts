@@ -113,6 +113,10 @@ describe("webhooks", () => {
       db,
       events: ix.events,
       fetchImpl: captured as unknown as typeof globalThis.fetch,
+      lookupImpl: async (hostname) => [{
+        address: hostname === "internal.payflow.example" ? "10.1.2.3" : "93.184.216.34",
+        family: 4,
+      }],
     });
     dispatcher.bind(ix.events);
 
@@ -217,6 +221,35 @@ describe("webhooks", () => {
       signature: sign(merchant, "ftp://example.com/hook", timestamp, seed),
     });
     assert.equal(res.status, 400);
+  });
+
+  test("registration refuses loopback IPs and hostnames resolving to private addresses", async () => {
+    for (const target of [
+      "http://127.0.0.1/admin",
+      "http://[::1]/admin",
+      "http://[::ffff:127.0.0.1]/admin",
+      "https://internal.payflow.example/hook",
+    ]) {
+      const timestamp = nowSec();
+      const res = await post("/api/webhooks", {
+        merchant,
+        url: target,
+        secret,
+        timestamp,
+        signature: sign(merchant, target, timestamp, seed),
+      });
+      assert.equal(res.status, 400, target);
+      assert.equal(
+        (res.body as { error: { code: string } }).error.code,
+        "invalid_request",
+        target,
+      );
+      assert.equal(
+        (db.prepare("SELECT COUNT(*) AS n FROM webhooks WHERE url = ?").get(target) as { n: number }).n,
+        0,
+        "unsafe target was not stored",
+      );
+    }
   });
 
   test("a charge event dispatches a signed POST to each registered webhook", async () => {
@@ -499,7 +532,11 @@ describe("charge streak webhooks", () => {
     return new Response("ok", { status: 200 });
   };
   const dispatcherFor = (db: ReturnType<typeof openDatabase>): WebhookDispatcher =>
-    new WebhookDispatcher({ db, fetchImpl: fetchImpl as typeof fetch });
+    new WebhookDispatcher({
+      db,
+      fetchImpl: fetchImpl as typeof fetch,
+      lookupImpl: async () => [{ address: "93.184.216.34", family: 4 }],
+    });
 
   test("charge.failing carries the mandate, shortfall and next retry, signed like a charge", async () => {
     received.length = 0;

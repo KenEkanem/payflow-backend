@@ -673,6 +673,13 @@ ed25519 signature over `payflow-webhook:v1:<merchant>:<url>:<timestamp>`
 HMAC-SHA256 secret used to sign deliveries; treat it as a secret and never
 log it.
 
+Webhook targets must resolve only to public IP addresses. Registration checks
+all resolved addresses, and each delivery checks DNS again and connects to the
+checked address. Loopback, private, link-local, cloud metadata and other
+non-public addresses are rejected; redirects are not followed. Existing
+webhooks that resolve to an internal address will fail delivery until their
+target is changed to a public endpoint.
+
 Every delivery is a `POST` to the registered URL carrying:
 
 - `Idempotency-Key`: a UUID reused across retries, so receivers can collapse

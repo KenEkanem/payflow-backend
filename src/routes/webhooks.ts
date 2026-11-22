@@ -45,12 +45,13 @@ const registrationSchema = z.object({
     .refine(
       (value) => {
         try {
-          return ["http:", "https:"].includes(new URL(value).protocol);
+          const url = new URL(value);
+          return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password;
         } catch {
           return false;
         }
       },
-      "must be an http(s) URL",
+      "must be an http(s) URL without credentials",
     ),
   /** HMAC key used to sign deliveries; generated when absent. */
   secret: z.string().min(1).max(1_000).optional(),
@@ -197,6 +198,12 @@ export function webhooksRouter(db: Storage, dispatcher: WebhookDispatcher, auth?
         sendWrongAccount(req, res);
         return;
       }
+      if (!(await dispatcher.isPublicTarget(url))) {
+        sendApiError(res, req, 400, "invalid_request", undefined, [
+          { path: "url", message: "must resolve only to public addresses" },
+        ]);
+        return;
+      }
       res.json({ ...(await dispatcher.register(session.value, url, secret)), active: true });
       return;
     }
@@ -223,6 +230,13 @@ export function webhooksRouter(db: Storage, dispatcher: WebhookDispatcher, auth?
     if (!verifies(merchant, message, signatureBytes)) {
       sendApiError(res, req, 400, "invalid_request", undefined, [
         { path: "signature", message: "signature does not prove control of the merchant address" },
+      ]);
+      return;
+    }
+
+    if (!(await dispatcher.isPublicTarget(url))) {
+      sendApiError(res, req, 400, "invalid_request", undefined, [
+        { path: "url", message: "must resolve only to public addresses" },
       ]);
       return;
     }
