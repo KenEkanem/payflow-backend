@@ -52,7 +52,8 @@ export async function updateActivePlanSubscriber(
     if (membership?.mandate_count === 1) {
       await storage.run(
         `INSERT INTO plan_subscriber_counts (plan_id, active_subscribers) VALUES (?, 1)
-         ON CONFLICT(plan_id) DO UPDATE SET active_subscribers = active_subscribers + 1`,
+         ON CONFLICT(plan_id) DO UPDATE
+           SET active_subscribers = plan_subscriber_counts.active_subscribers + excluded.active_subscribers`,
         [after.plan_id],
       );
     }
